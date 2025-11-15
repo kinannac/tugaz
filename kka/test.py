@@ -1,12 +1,3 @@
-# smart_parking_revised.py
-# Revisi oleh assistant — sesuai request user:
-# - screen 1300x900
-# - jalan putih = navigable nodes (parkir tidak dilalui)
-# - entrance otomatis: y=1,2,3 -> north; y=4,5,6 -> south
-# - save single-record JSON overwrite (option A)
-# - popup + beep if all parking occupied
-# - larger legend / panels to avoid text clipping
-
 import pygame
 import sys
 import json
@@ -14,23 +5,14 @@ import math
 import heapq
 from collections import deque, defaultdict
 
-# Optional beep via numpy if available (best effort)
-try:
-    import numpy as _np
-    NUMPY_AVAILABLE = True
-except Exception:
-    NUMPY_AVAILABLE = False
+pygame.init() 
 
-pygame.init()
-if NUMPY_AVAILABLE:
-    pygame.mixer.init()
-
-# --- CONFIG ---
+# Mengatur ukuran layar aplikasi dan frame per second animasi 
 SCREEN_WIDTH = 1200
 SCREEN_HEIGHT = 800
-FPS = 60
+FPS = 50
 
-# Colors
+# Warna yang dipakai untuk menggambarkan objek di layar 
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
 BLUE = (100, 150, 255)
@@ -46,55 +28,53 @@ NAVY = (10, 30, 80)
 PURPLE = (170, 50, 170)
 ALERT_RED = (200, 30, 30)
 
-FONT_PATH = None  # default pygame font
-
-# JSON file for saving single-record (overwrite)
-JSON_PATH = "last_target_parking.json"
+# "Times New Roman" = "Times New Roman"  # default pygame font
 
 class SmartParkingSystem:
     def __init__(self):
-        self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-        pygame.display.set_caption("Smart Parking System")
-        self.clock = pygame.time.Clock()
+        # setup pygame 
+        self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT)) # ukuran layar 
+        pygame.display.set_caption("Smart Parking System") # judul aplikasi 
+        self.clock = pygame.time.Clock() # pengatur frame rate
 
-        # Fonts (bigger sizes to avoid clipping)
-        self.font_large = pygame.font.Font(FONT_PATH, 42)
-        self.font_medium = pygame.font.Font(FONT_PATH, 28)
-        self.font_small = pygame.font.Font(FONT_PATH, 20)
-        self.font_tiny = pygame.font.Font(FONT_PATH, 16)
+        # Inisialisasi Font 
+        self.font_xl = pygame.font.SysFont("Times New Roman", 42) 
+        self.font_l = pygame.font.SysFont("Times New Roman", 28)
+        self.font_m = pygame.font.SysFont("Times New Roman", 24)
+        self.font_s = pygame.font.SysFont("Times New Roman", 20)
+        self.font_xs = pygame.font.SysFont("Times New Roman", 16)
+        self.state = "splash" # state awal aplikasi 
+        self.animation_counter = 0 # counter untuk animasi 
 
-        self.state = "splash"  # splash or map
-        self.animation_counter = 0
-
-        # Layout parameters
-        self.grid_size = 48
+        # Grid dan layout 
+        self.grid_size = 48 
         self.grid_cols = 9
         self.grid_rows = 8
 
-        # Offsets
-        self.parking_offset_x = 40
+        # Offsets untuk menggambar layout parkiran dan mall 
+        self.parking_offset_x = 40 
         self.parking_offset_y = 120
         self.mall_offset_x = 560
         self.mall_offset_y = 120
 
-        # Start / current position (purple marker)
-        self.start_position = (1, 7)
-        self.current_position = self.start_position
+        # Start node
+        self.start_position = (1, 7) # posisi awal mobil 
+        self.current_position = self.start_position # posisi mobil saat ini 
 
-        # Data
-        self.setup_shops()
-        self.setup_parking_spots()
-        # Build graph of navigable nodes (roads) - exclude parking spots
-        self.build_graph()
+        # Setup shops dan parking spots
+        self.setup_shops() # daftar toko di mall
+        self.setup_parking_spots() # daftar sopot parkir 
+        self.build_graph() # graf jalur parkir 
+        self.cars_entered = 0  # jumlah mobil yang sudah masuk parkiran
 
-        # Selection / path
-        self.selected_shop = None
-        self.algorithm = "A*"  # default
-        self.path = []
+        # Pathfinding state 
+        self.selected_shop = None 
+        self.algorithm = "A*"  
+        self.path = [] 
         self.path_cost = 0
         self.target_parking = None
 
-        # Occupied tracking
+        # Parking occupancy
         self.occupied_parking = set()
 
         # UI interaction
@@ -102,9 +82,15 @@ class SmartParkingSystem:
         self.algo_buttons = {}
         self.popup_timer = 0
 
+        self.moving = False 
+        self.movement_queue = []
+        self.movement_speed = 12   # frame per step
+        self.movement_counter = 0
+
+        self.load_parking_data()
+
+    # Setup shops and parking spots
     def setup_shops(self):
-        # define shops with positions (x,y). We'll compute entrance automatically based on y.
-        # positions chosen to match mockup columns
         self.shops = {
             "SOGO": (1, 1),
             "Watsons": (4, 1),
@@ -126,107 +112,105 @@ class SmartParkingSystem:
             "Fore": (7, 6),
         }
 
-    def setup_parking_spots(self):
-        # parking coordinates (x,y). These are parking tiles (not traversable)
+    # Setup parking spots
+    def setup_parking_spots(self): 
         self.initial_parking_spots = [
-            (0,1),(0,2),(0,3),(0,4),(0,5),(0,6),
-            (3,1),(3,2),(3,3),(3,4),(3,5),(3,6),
+            (0,1),(0,2),(0,3),(0,4),(0,5),(0,6), 
+            (3,1),(3,2),(3,3),(3,4),(3,5),(3,6), 
             (4,1),(4,2),(4,3),(4,4),(4,5),(4,6),
             (7,1),(7,2),(7,3),(7,4),(7,5),(7,6)
         ]
         self.parking_spots = list(self.initial_parking_spots)
-
-    def build_graph(self):
-        """Build adjacency list for navigable nodes (exclude parking spots).
-        Nodes are grid coordinates (x,y). Roads include all nodes except those in parking_spots.
-        """
-        self.graph = defaultdict(list)
+        
+    # Build graph for pathfinding
+    def build_graph(self): # membuat graf jalur parkir
+        self.graph = defaultdict(list) 
         self.positions = {}
 
-        for x in range(self.grid_cols):
-            for y in range(self.grid_rows):
-                # store pixel center for drawing
-                center_x = self.parking_offset_x + x * self.grid_size + self.grid_size // 2
-                center_y = self.parking_offset_y + y * self.grid_size + self.grid_size // 2
-                self.positions[(x, y)] = (center_x, center_y)
+        for x in range(self.grid_cols): # kolom grid
+            for y in range(self.grid_rows): # baris grid
+                # hitung posisi tengah setiap node
+                center_x = self.parking_offset_x + x * self.grid_size + self.grid_size // 2 # posisi x tengah
+                center_y = self.parking_offset_y + y * self.grid_size + self.grid_size // 2 # posisi y tengah
+                self.positions[(x, y)] = (center_x, center_y) # simpan posisi tengah node
 
-        # navigable nodes = all nodes that are NOT parking_spots
-        self.navigable = set((x,y) for x in range(self.grid_cols) for y in range(self.grid_rows)
-                             if (x,y) not in self.parking_spots)
-
-        # ensure start position is navigable (if it's a parking spot we allow it)
+        # navigable nodes = semua node kecuali parkiran
+        self.navigable = set((x,y) for x in range(self.grid_cols) for y in range(self.grid_rows) # 
+                             if (x,y) not in self.parking_spots) 
         if self.start_position not in self.navigable:
             self.navigable.add(self.start_position)
 
-        # Build adjacency for navigable nodes
-        deltas = [(0,1),(1,0),(0,-1),(-1,0)]
-        for node in list(self.navigable):
-            x,y = node
-            for dx,dy in deltas:
+        # buat edges antar node
+        deltas = [(0,1),(1,0),(0,-1),(-1,0)] # arah gerak: bawah, kanan, atas, kiri
+        for node in list(self.navigable): # setiap node yang bisa dilalui
+            x,y = node 
+            for dx,dy in deltas: 
                 nx,ny = x+dx, y+dy
                 if 0 <= nx < self.grid_cols and 0 <= ny < self.grid_rows:
-                    # neighbor must be navigable OR might be target (handled in search)
                     if (nx,ny) in self.navigable:
                         self.graph[node].append(((nx,ny), 1))
-
-        # Note: parking nodes are intentionally NOT in graph; when computing path to a parking,
-        # we'll allow an end node by connecting it temporally to adjacent navigable nodes.
-
+    
+    # Tentukan posisi pintu masuk berdasarkan toko
     def get_entrance_position(self, shop_name):
-        """Compute entrance coordinate (parking grid) based on shop y value.
-        Shops with y in 1,2,3 -> north (entrance at row 0)
-        Shops with y in 4,5,6 -> south (entrance at row grid_rows-1)
-        Entrance x aligned with shop x (or nearest valid)
-        """
         if shop_name not in self.shops:
-            return (1, 0)
-        x,y = self.shops[shop_name]
-        if y in (1,2,3):
-            entrance_y = 0
-        else:
-            entrance_y = self.grid_rows - 1
-        # clamp x to grid
-        ex = max(0, min(self.grid_cols-1, x))
-        return (ex, entrance_y)
+            return (0, 0)   # default fallback
 
-    # ---------------- Pathfinding algorithms ----------------
+        x, y = self.shops[shop_name]
+
+        # toko di bagian utara (y = 1,2,3)
+        if y <= 3:
+            return (0, 0)   # pintu utara
+
+        # toko di bagian selatan (y = 4,5,6)
+        return (0, self.grid_rows - 1)  # pintu selatan (0,7)
+
+    # Heuristic function for A* and GBFS
     def heuristic(self, a, b):
         return abs(a[0]-b[0]) + abs(a[1]-b[1])
 
-    def neighbors_for_search(self, current, end):
-        """Return list of neighbors for current during search.
-        We treat neighbors that are navigable normally. We also allow the 'end' node
-        even if it's a parking spot by connecting end to its adjacent navigable nodes.
-        """
-        results = []
-        # standard neighbors from self.graph if current is navigable
-        if current in self.graph:
-            for nb, cost in self.graph[current]:
-                results.append((nb, cost))
+    # Get neighbors for pathfinding
+    def neighbors_for_search(self, node, goal):
+        x, y = node
+        dirs = [(1,0), (-1,0), (0,1), (0,-1)]
+        result = []
 
-        # if current is adjacent to the end (end may be parking), add end as neighbor
-        if end is not None:
-            ex,ey = end
-            cx,cy = current
-            if abs(ex-cx) + abs(ey-cy) == 1:
-                # allow stepping into the end even if it's a parking spot (cost 1)
-                results.append((end, 1))
+        # cek semua arah
+        for dx, dy in dirs:
+            nx, ny = x + dx, y + dy
+            # batas grid
+            if nx < 0 or nx >= self.grid_cols or ny < 0 or ny >= self.grid_rows:
+                continue
+            # tidak boleh lewat pintu
+            if node != (0, 0) and (nx, ny) in [(0, 0), (0, self.grid_rows - 1)]:
+                continue
+            # tidak boleh lewat parkiran
+            if (nx, ny) in self.occupied_parking and (nx, ny) != goal:
+                continue
+            if (nx, ny) in self.parking_spots and (nx, ny) != goal:
+                continue
+            # tambahkan neighbor
+            result.append(((nx, ny), 1))
 
-        return results
+        return result
 
+    # BFS implementation
     def bfs(self, start, end):
         queue = deque([(start, [start])])
         visited = {start}
+        # BFS loop
         while queue:
             current, path = queue.popleft()
+            # check goal
             if current == end:
                 return path, len(path)-1
+            # explore neighbors
             for neighbor, _ in self.neighbors_for_search(current, end):
                 if neighbor not in visited:
                     visited.add(neighbor)
                     queue.append((neighbor, path + [neighbor]))
         return [], 0
-
+    
+    # DFS implementation
     def dfs(self, start, end):
         stack = [(start, [start])]
         visited = {start}
@@ -240,6 +224,7 @@ class SmartParkingSystem:
                     stack.append((neighbor, path + [neighbor]))
         return [], 0
 
+    # GBFS implementation
     def gbfs(self, start, end):
         """Greedy Best First Search"""
         open_set = []
@@ -267,7 +252,8 @@ class SmartParkingSystem:
                     heapq.heappush(open_set, (h, neighbor))
 
         return [], 0
-
+    
+    # A* implementation
     def a_star(self, start, end):
         open_heap = []
         heapq.heappush(open_heap, (0 + self.heuristic(start, end), 0, start))
@@ -296,27 +282,31 @@ class SmartParkingSystem:
                     heapq.heappush(open_heap, (fscore, tentative_g, neighbor))
         return [], 0
 
-    def find_closest_parking(self, entrance_pos):
+    def find_closest_parking_with_pathfinding(self, entrance):
         best = None
-        best_dist = float('inf')
+        best_cost = float('inf')
+
         for spot in self.parking_spots:
             if spot in self.occupied_parking:
                 continue
-            # compute Manhattan distance from entrance to parking spot
-            d = abs(spot[0] - entrance_pos[0]) + abs(spot[1] - entrance_pos[1])
-            if d < best_dist:
-                best_dist = d
+
+            path, cost = self.a_star(entrance, spot)
+
+            if path and cost < best_cost:
+                best_cost = cost
                 best = spot
+
         return best
 
     def find_path(self, shop_name, algorithm):
-        if shop_name not in self.shops:
-            return
-        # compute entrance by y rule
+
+        # tentukan pintu mall
         entrance = self.get_entrance_position(shop_name)
-        parking = self.find_closest_parking(entrance)
+
+        # pilih parkiran terdekat dari pintu mall
+        parking = self.find_closest_parking_with_pathfinding(entrance)
+
         if parking is None:
-            # no parking available
             self.path = []
             self.target_parking = None
             self.selected_shop = shop_name
@@ -338,108 +328,110 @@ class SmartParkingSystem:
         else:
             path, cost = self.a_star(start, end)
 
-        # path might be empty (no path found)
         self.path = path
         self.path_cost = cost
 
     def mark_parking_occupied(self):
-        if self.target_parking:
-            self.occupied_parking.add(self.target_parking)
-            # update current position to that parking
-            self.current_position = self.target_parking
-            # save JSON (overwrite single-record)
-            self.save_target_json()
-            # clear path after marking
-            self.path = []
-            self.target_parking = None
-            # if all full, trigger popup + beep
+        if self.target_parking and self.path:
+            self.movement_queue = self.path[1:].copy()
+            self.moving = True
+            self.movement_counter = 0
+
+            # trigger popup jika penuh
             if len(self.occupied_parking) >= len(self.parking_spots):
                 self.trigger_full_popup()
+    
+    def animate_movement(self):
+        """Animates the car moving step-by-step along the path"""
+        if not self.moving or not self.movement_queue:
+            return
 
-    def save_target_json(self):
-        rec = {
-            "shop": self.selected_shop,
-            "parking": list(self.current_position),
-            "algorithm": self.algorithm,
-            "path": [list(node) for node in self.path]  # current path (probably cleared)
+        self.movement_counter += 1
+
+        if self.movement_counter >= self.movement_speed:
+            self.movement_counter = 0
+            
+            # ambil node berikutnya
+            next_pos = self.movement_queue.pop(0)
+            self.current_position = next_pos
+
+            # jika sudah sampai target parking
+            if not self.movement_queue:
+                self.moving = False
+
+                # setelah sampai → tandai parkir sebagai occupied
+                self.occupied_parking.add(self.current_position)
+
+                # save JSON
+                self.cars_entered += 1
+                self.save_parking_data()
+
+                # hapus path dari layar
+                self.path = []
+                self.target_parking = None
+
+                # tampilkan popup jika penuh
+                if len(self.occupied_parking) >= len(self.parking_spots):
+                    self.trigger_full_popup()
+
+    def save_parking_data(self):
+        data = {
+            "occupied": [list(pos) for pos in self.occupied_parking],
+            "cars_entered": self.cars_entered
         }
+
         try:
-            with open(JSON_PATH, "w") as f:
-                json.dump(rec, f, indent=2)
-        except Exception as e:
-            print("Error saving JSON:", e)
+            with open("parking_data.json", "w") as f:
+                json.dump(data, f, indent=4)
+        except:
+            print("Error saving JSON")
+
 
     def trigger_full_popup(self):
-        # set popup state (we'll draw it in draw_map)
-        self.popup_timer = 180  # 3 seconds @ 60fps
-        # try beep
+        self.popup_timer = 180 
         self.try_beep()
 
-    def try_beep(self):
-        # Try numpy generated tone if available
-        if NUMPY_AVAILABLE:
-            try:
-                freq = 880
-                duration = 0.25
-                sample_rate = 44100
-                t = _np.linspace(0, duration, int(sample_rate * duration), False)
-                tone = _np.sin(freq * 2 * _np.pi * t) * 0.5
-                # convert to 16-bit signed ints
-                audio = _np.int16(tone * 32767)
-                sound = pygame.sndarray.make_sound(audio)
-                sound.play()
-            except Exception:
-                try:
-                    print('\a', end='', flush=True)
-                except Exception:
-                    pass
-        else:
-            try:
-                print('\a', end='', flush=True)
-            except Exception:
-                pass
-
-    # ---------------- Drawing functions ----------------
+    # fungsi draw
     def draw_splash(self):
         self.screen.fill(WHITE)
         
-        # Title
-        title = self.font_large.render("Smart Parking System", True, BLACK)
+        # judul
+        title = self.font_xl.render("Smart Parking System", True, BLACK)
         self.screen.blit(title, (SCREEN_WIDTH // 2 - title.get_width() // 2, 200))
         
-        # Creators
+        # creators
         creators_y = 320
         creators = [
             "create by:",
-            "• Salwa Nadia Maharani",
-            "• Naura Rossa Azalia",
-            "• Kinanti Ayu Caesandria"
+            "Salwa Nadia Maharani",
+            "Naura Rossa Azalia",
+            "Kinanti Ayu Caesandria"
         ]
         
         for i, creator in enumerate(creators):
-            text = self.font_small.render(creator, True, BLACK)
+            text = self.font_m.render(creator, True, BLACK)
             self.screen.blit(text, (SCREEN_WIDTH // 2 - text.get_width() // 2, creators_y + i * 50))
         
-        # Continue text with blinking effect
+        # continue (efek blink)
         if (self.animation_counter // 30) % 2 == 0:
-            continue_text = self.font_small.render("press any key or click to continue...", True, DARK_GRAY)
+            continue_text = self.font_m.render("press any key or click to continue...", True, DARK_GRAY)
             self.screen.blit(continue_text, (SCREEN_WIDTH // 2 - continue_text.get_width() // 2, 650))
         
         self.animation_counter += 1
 
     def draw_parking_layout(self):
-        # Title
-        title = self.font_medium.render("Layout Parkiran", True, BLACK)
+        # judul
+        title = self.font_l.render("Layout Parkiran", True, BLACK)
         self.screen.blit(title, (self.parking_offset_x, self.parking_offset_y - 40))
 
-        # grid (light)
+        # grid layout
         for x in range(self.grid_cols):
             for y in range(self.grid_rows):
                 rx = self.parking_offset_x + x*self.grid_size
                 ry = self.parking_offset_y + y*self.grid_size
                 pygame.draw.rect(self.screen, LIGHT_BLUE, (rx, ry, self.grid_size, self.grid_size), 1)
 
-        # draw parking spots (filled squares)
+        # parking spots
         for spot in self.parking_spots:
             sx, sy = spot
             rx = self.parking_offset_x + sx*self.grid_size
@@ -448,8 +440,7 @@ class SmartParkingSystem:
             pygame.draw.rect(self.screen, color, (rx+4, ry+4, self.grid_size-8, self.grid_size-8))
             pygame.draw.rect(self.screen, BLACK, (rx+4, ry+4, self.grid_size-8, self.grid_size-8), 2)
 
-        # draw entrances (green small squares) - north and south indicators
-        # North at row 0 (x positions to indicate entries)
+        # pintu masuk mall
         north_positions = [(0,0)]
         south_positions = [(0,self.grid_rows-1)]
         for ex,ey in north_positions+south_positions:
@@ -457,18 +448,12 @@ class SmartParkingSystem:
             pygame.draw.rect(self.screen, GREEN, (cx-6, cy-6, 12, 12))
             pygame.draw.rect(self.screen, BLACK, (cx-6, cy-6, 12, 12), 1)
 
-        # Draw path (navy dots) - path may include end parking node, which is not navigable normally
         if self.path and len(self.path) > 0:
             for i,node in enumerate(self.path):
                 px,py = self.positions[node]
-                # avoid drawing dot inside parking tile (draw at center)
                 pygame.draw.circle(self.screen, NAVY, (int(px), int(py)), 6)
-                # draw small steps/dots between nodes optionally
-                #if i < len(self.path)-1:
-                #    nx,ny = self.positions[self.path[i+1]]
-                #    pygame.draw.line(self.screen, NAVY, (px,py), (nx,ny), 3)
-
-        # draw target parking blinking
+        
+        # parkiran target blink
         if self.target_parking:
             tx,ty = self.target_parking
             rx = self.parking_offset_x + tx*self.grid_size
@@ -477,15 +462,15 @@ class SmartParkingSystem:
                 pygame.draw.rect(self.screen, PINK, (rx+6, ry+6, self.grid_size-12, self.grid_size-12))
             pygame.draw.rect(self.screen, BLACK, (rx+6, ry+6, self.grid_size-12, self.grid_size-12), 2)
 
-        # draw current position (purple circle)
+        # posisi sekarang 
         if self.current_position in self.positions:
             cx,cy = self.positions[self.current_position]
             pygame.draw.circle(self.screen, PURPLE, (int(cx), int(cy)), 14)
             pygame.draw.circle(self.screen, BLACK, (int(cx), int(cy)), 14, 2)
 
     def draw_mall_layout(self):
-        # title
-        title = self.font_medium.render("Layout Mall", True, BLACK)
+        # judul
+        title = self.font_l.render("Layout Mall", True, BLACK)
         self.screen.blit(title, (self.mall_offset_x, self.mall_offset_y - 40))
 
         # mall grid
@@ -497,7 +482,7 @@ class SmartParkingSystem:
                 ry = self.mall_offset_y + y*self.grid_size
                 pygame.draw.rect(self.screen, LIGHT_BLUE, (rx, ry, self.grid_size, self.grid_size), 1)
 
-        # draw shops
+        # pertokoan
         for shop_name, (sx,sy) in self.shops.items():
             rx = self.mall_offset_x + sx*self.grid_size
             ry = self.mall_offset_y + sy*self.grid_size
@@ -505,26 +490,25 @@ class SmartParkingSystem:
             color = ORANGE if shop_name == self.selected_shop else YELLOW
             pygame.draw.rect(self.screen, color, rect)
             pygame.draw.rect(self.screen, BLACK, rect, 2)
-            # text wrap: try to fit name in two lines
             words = shop_name.split()
             line1 = words[0] if len(words) > 0 else ""
             line2 = " ".join(words[1:]) if len(words) > 1 else ""
-            t1 = self.font_tiny.render(line1, True, BLACK)
+            t1 = self.font_xs.render(line1, True, BLACK)
             self.screen.blit(t1, (rx+6, ry+5))
             if line2:
-                t2 = self.font_tiny.render(line2, True, BLACK)
+                t2 = self.font_xs.render(line2, True, BLACK)
                 self.screen.blit(t2, (rx+6, ry+5+16))
 
     def draw_legend(self):
         legend_x = 30
         legend_y = SCREEN_HEIGHT - 250
-        w = 360
+        w = 370
         h = 170
 
         pygame.draw.rect(self.screen, LIGHT_BLUE, (legend_x, legend_y, w, h))
         pygame.draw.rect(self.screen, BLACK, (legend_x, legend_y, w, h), 2)
 
-        title = self.font_small.render("Keterangan Warna:", True, BLACK)
+        title = self.font_s.render("Keterangan Warna:", True, BLACK)
         self.screen.blit(title, (legend_x + 12, legend_y + 8))
 
         items_left = [
@@ -546,27 +530,27 @@ class SmartParkingSystem:
         y_start = legend_y + 40
 
         # posisi kolom kanan
-        x_right = legend_x + 190   # geser ke kanan
+        x_right = legend_x + 190
         y_right = legend_y + 40
 
-        # Gambar kolom kiri
+        # buat kolom kiri
         y = y_start
         for label, color in items_left:
             pygame.draw.rect(self.screen, color, (x_left, y, 20, 20))
             pygame.draw.rect(self.screen, BLACK, (x_left, y, 20, 20), 1)
 
-            text = self.font_tiny.render(label, True, BLACK)
+            text = self.font_xs.render(label, True, BLACK)
             self.screen.blit(text, (x_left + 30, y + 2))
 
             y += 28
 
-        # Gambar kolom kanan
+        # buat kolom kanan
         y = y_right
         for label, color in items_right:
             pygame.draw.rect(self.screen, color, (x_right, y, 20, 20))
             pygame.draw.rect(self.screen, BLACK, (x_right, y, 20, 20), 1)
 
-            text = self.font_tiny.render(label, True, BLACK)
+            text = self.font_xs.render(label, True, BLACK)
             self.screen.blit(text, (x_right + 30, y + 2))
 
             y += 28
@@ -578,11 +562,10 @@ class SmartParkingSystem:
         h = 170
         pygame.draw.rect(self.screen, LIGHT_BLUE, (px, py, w, h))
         pygame.draw.rect(self.screen, BLACK, (px, py, w, h), 2)
-        title = self.font_small.render("Pilihan Metode:", True, BLACK)
+        title = self.font_s.render("Pilihan Metode:", True, BLACK)
         self.screen.blit(title, (px+12, py+8))
 
         algos = ["DFS","BFS","GBFS","A*"]
-        # spread buttons
         gap = 90
         start_x = px + 18
         self.algo_buttons.clear()
@@ -592,17 +575,21 @@ class SmartParkingSystem:
             color = GREEN if self.algorithm == algo else GRAY
             pygame.draw.rect(self.screen, color, rect)
             pygame.draw.rect(self.screen, BLACK, rect, 2)
-            t = self.font_small.render(algo, True, BLACK)
+            t = self.font_s.render(algo, True, BLACK)
             tr = t.get_rect(center=rect.center)
             self.screen.blit(t, tr)
             self.algo_buttons[algo] = rect
 
-        # START button
-        sr = pygame.Rect(px+110, py+92, 220, 56)
+        # tombol "start"
+        panel_width = 440 
+        sr = pygame.Rect(0, 0, 220, 56)  
+        sr.centerx = px + panel_width // 2
+        sr.top = py + 92
+
         self.start_button_rect = sr
         pygame.draw.rect(self.screen, (160,255,160), sr)
         pygame.draw.rect(self.screen, BLACK, sr, 3)
-        st = self.font_medium.render("START", True, BLACK)
+        st = self.font_l.render("START", True, BLACK)
         self.screen.blit(st, st.get_rect(center=sr.center))
 
     def draw_info_panel(self):
@@ -612,7 +599,7 @@ class SmartParkingSystem:
         h = 170
         pygame.draw.rect(self.screen, LIGHT_BLUE, (ix, iy, w, h))
         pygame.draw.rect(self.screen, BLACK, (ix, iy, w, h), 2)
-        title = self.font_small.render("Detail Informasi:", True, BLACK)
+        title = self.font_s.render("Detail Informasi:", True, BLACK)
         self.screen.blit(title, (ix+12, iy+8))
 
         if self.selected_shop:
@@ -625,38 +612,39 @@ class SmartParkingSystem:
             ]
             y = iy+36
             for line in lines:
-                txt = self.font_tiny.render(line, True, BLACK)
+                txt = self.font_xs.render(line, True, BLACK)
                 self.screen.blit(txt, (ix+12, y))
                 y += 26
         else:
-            txt = self.font_tiny.render("Pilih toko terlebih dahulu", True, DARK_GRAY)
+            txt = self.font_xs.render("Pilih toko terlebih dahulu", True, DARK_GRAY)
             self.screen.blit(txt, (ix+12, iy+50))
 
     def draw_popup_full(self):
-        # centered red popup with warning text
+        # popup parkiran penuh
         w = 600
         h = 180
         x = SCREEN_WIDTH//2 - w//2
         y = SCREEN_HEIGHT//2 - h//2
+
         pygame.draw.rect(self.screen, ALERT_RED, (x,y,w,h))
         pygame.draw.rect(self.screen, BLACK, (x,y,w,h), 4)
-        title = self.font_large.render("SEMUA PARKIRAN PENUH!", True, WHITE)
-        subtitle = self.font_medium.render("Mohon maaf, tidak ada slot tersisa.", True, WHITE)
+        title = self.font_xl.render("SEMUA PARKIRAN PENUH!", True, WHITE)
+        subtitle = self.font_l.render("Mohon maaf, tidak ada slot tersisa.", True, WHITE)
         self.screen.blit(title, (x + w//2 - title.get_width()//2, y+30))
         self.screen.blit(subtitle, (x + w//2 - subtitle.get_width()//2, y+100))
 
     def handle_click(self, pos):
-        # Check mall shop click
+        # cek klik toko mall
         for shop_name, (sx,sy) in self.shops.items():
             rx = self.mall_offset_x + sx*self.grid_size + 2
             ry = self.mall_offset_y + sy*self.grid_size + 2
             rect = pygame.Rect(rx, ry, self.grid_size-4, self.grid_size-4)
             if rect.collidepoint(pos):
-                # select shop and compute path
+                # pilih toko
                 self.find_path(shop_name, self.algorithm)
                 return
 
-        # algorithm buttons
+        # tombol algoritma
         for algo, rect in self.algo_buttons.items():
             if rect.collidepoint(pos):
                 self.algorithm = algo
@@ -664,14 +652,25 @@ class SmartParkingSystem:
                     self.find_path(self.selected_shop, self.algorithm)
                 return
 
-        # START button
+        # tombol "start"
         if self.start_button_rect and self.start_button_rect.collidepoint(pos):
-            # require selected shop and target_parking (found earlier when selecting shop)
             if self.selected_shop and self.target_parking:
                 self.mark_parking_occupied()
+
             else:
-                # nothing selected; small feedback (blink)
                 pass
+
+    def load_parking_data(self):
+        try:
+            with open("parking_data.json", "r") as f:
+                data = json.load(f)
+                self.occupied_parking = {tuple(x) for x in data.get("occupied", [])}
+                self.cars_entered = data.get("cars_entered", 0)
+        except FileNotFoundError:
+            # kalau belum ada file, mulai fresh
+            self.occupied_parking = set()
+            self.cars_entered = 0
+
 
     def handle_event(self, event):
         if event.type == pygame.QUIT:
@@ -680,7 +679,6 @@ class SmartParkingSystem:
             if self.state == "splash":
                 self.state = "map"
             else:
-                # keyboard shortcuts: space to open splash? ignore
                 pass
         if event.type == pygame.MOUSEBUTTONDOWN:
             if self.state == "splash":
@@ -699,13 +697,15 @@ class SmartParkingSystem:
             if self.state == "splash":
                 self.draw_splash()
             else:
-                # draw map and UI
+                # gambar peta dan UI
+                self.animate_movement()
                 self.draw_parking_layout()
                 self.draw_mall_layout()
                 self.draw_legend()
                 self.draw_control_panel()
                 self.draw_info_panel()
-                # popup if triggered
+
+                # popup parkiran penuh
                 if self.popup_timer > 0:
                     self.draw_popup_full()
                     self.popup_timer -= 1
