@@ -28,8 +28,6 @@ NAVY = (10, 30, 80)
 PURPLE = (170, 50, 170)
 ALERT_RED = (200, 30, 30)
 
-# "Times New Roman" = "Times New Roman"  # default pygame font
-
 class SmartParkingSystem:
     def __init__(self):
         # setup pygame 
